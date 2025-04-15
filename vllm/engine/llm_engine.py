@@ -63,6 +63,11 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
 from vllm.version import __version__ as VLLM_VERSION
 from vllm.worker.model_runner_base import InputProcessingError
 
+# new imports
+import psutil
+import os
+import csv
+
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
 
@@ -1374,14 +1379,22 @@ class LLMEngine:
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
             
+            # === Profiling Phase ===
+            proc = psutil.Process(os.getpid())
+
             profiling_start = time.perf_counter()
-            
+            cpu_before_profile = proc.cpu_percent(interval=None)
+            mem_before_profile = proc.memory_info().rss / 1024**3 
+
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
             
             profiling_end = time.perf_counter()
+            cpu_after_profile = proc.cpu_percent(interval=None)
+            mem_after_profile = proc.memory_info().rss / 1024**3
+            profiling_latency = profiling_end - profiling_start
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1437,19 +1450,51 @@ class LLMEngine:
                     virtual_engine]
 
             try:
+                # === Decode Phase ===
+                
                 decode_start = time.perf_counter()
+                cpu_before_decode = proc.cpu_percent(interval=None)
+                mem_before_decode = proc.memory_info().rss / 1024**3
+
     
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 
                 decode_end = time.perf_counter()
+                cpu_after_decode = proc.cpu_percent(interval=None)
+                mem_after_decode = proc.memory_info().rss / 1024**3
+                decode_latency = decode_end - decode_start
                 
-                print("======== vLLM Timing ========")
-                print(f"Profiling phase: {profiling_end - profiling_start:.4f} s")
-                print(f"Decode phase:    {decode_end - decode_start:.4f} s")
-                print(f"Total step:      {decode_end - profiling_start:.4f} s")
-                print("================================")
                 
+                # === Logging Metrics ===
+                log_file = os.getenv("VLLM_LOG_PATH", "output/vllm_log.csv")
+
+                if not os.path.exists(log_file):
+                    os.makedirs(os.path.dirname(log_file), exist_ok=True)
+                    with open(log_file, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow([
+                            "profiling_time_s",
+                            "decode_time_s",
+                            "total_time_s",
+                            "cpu_profile_pct",
+                            "mem_profile_gb",
+                            "cpu_decode_pct",
+                            "mem_decode_gb"
+                        ])
+
+                with open(log_file, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        profiling_latency,
+                        decode_latency,
+                        decode_end - profiling_start,
+                        cpu_after_profile,
+                        mem_after_profile,
+                        cpu_after_decode,
+                        mem_after_decode
+                    ])
+
                 self._skip_scheduling_next_step = False
                 
             except InputProcessingError as e:
@@ -1536,7 +1581,6 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
-
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
