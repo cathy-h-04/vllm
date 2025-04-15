@@ -1373,10 +1373,15 @@ class LLMEngine:
         if not self._has_remaining_steps(
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
+            
+            profiling_start = time.perf_counter()
+            
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
              allow_async_output_proc
              ) = self.scheduler[virtual_engine].schedule()
+            
+            profiling_end = time.perf_counter()
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1432,9 +1437,21 @@ class LLMEngine:
                     virtual_engine]
 
             try:
+                decode_start = time.perf_counter()
+    
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
+                
+                decode_end = time.perf_counter()
+                
+                print("======== vLLM Timing ========")
+                print(f"Profiling phase: {profiling_end - profiling_start:.4f} s")
+                print(f"Decode phase:    {decode_end - decode_start:.4f} s")
+                print(f"Total step:      {decode_end - profiling_start:.4f} s")
+                print("================================")
+                
                 self._skip_scheduling_next_step = False
+                
             except InputProcessingError as e:
                 # The input for this request cannot be processed, so we must
                 # abort it. If there are remaining requests in the batch that
