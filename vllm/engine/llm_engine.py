@@ -67,6 +67,7 @@ from vllm.worker.model_runner_base import InputProcessingError
 import psutil
 import os
 import csv
+import statistics
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -427,6 +428,7 @@ class LLMEngine:
         # Flag to set when an input fails to process and the engine should run
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
+        self.engine_step_count = 0
 
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1452,48 +1454,48 @@ class LLMEngine:
             try:
                 # === Decode Phase ===
                 
-                decode_start = time.perf_counter()
-                cpu_before_decode = proc.cpu_percent(interval=None)
-                mem_before_decode = proc.memory_info().rss / 1024**3
+                # decode_start = time.perf_counter()
+                # cpu_before_decode = proc.cpu_percent(interval=None)
+                # mem_before_decode = proc.memory_info().rss / 1024**3
 
     
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 
-                decode_end = time.perf_counter()
-                cpu_after_decode = proc.cpu_percent(interval=None)
-                mem_after_decode = proc.memory_info().rss / 1024**3
-                decode_latency = decode_end - decode_start
+                # decode_end = time.perf_counter()
+                # cpu_after_decode = proc.cpu_percent(interval=None)
+                # mem_after_decode = proc.memory_info().rss / 1024**3
+                # decode_latency = decode_end - decode_start
                 
                 
                 # === Logging Metrics ===
-                log_file = os.getenv("VLLM_LOG_PATH", "output/vllm_log.csv")
+                # log_file = os.getenv("VLLM_LOG_PATH", "output/vllm_log.csv")
 
-                if not os.path.exists(log_file):
-                    os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                    with open(log_file, "w", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow([
-                            "profiling_time_s",
-                            "decode_time_s",
-                            "total_time_s",
-                            "cpu_profile_pct",
-                            "mem_profile_gb",
-                            "cpu_decode_pct",
-                            "mem_decode_gb"
-                        ])
+                # if not os.path.exists(log_file):
+                #     os.makedirs(os.path.dirname(log_file), exist_ok=True)
+                #     with open(log_file, "w", newline="") as f:
+                #         writer = csv.writer(f)
+                #         writer.writerow([
+                #             "profiling_time_s",
+                #             "decode_time_s",
+                #             "total_time_s",
+                #             "cpu_profile_pct",
+                #             "mem_profile_gb",
+                #             "cpu_decode_pct",
+                #             "mem_decode_gb"
+                #         ])
 
-                with open(log_file, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        profiling_latency,
-                        decode_latency,
-                        decode_end - profiling_start,
-                        cpu_after_profile,
-                        mem_after_profile,
-                        cpu_after_decode,
-                        mem_after_decode
-                    ])
+                # with open(log_file, "a", newline="") as f:
+                #     writer = csv.writer(f)
+                #     writer.writerow([
+                #         profiling_latency,
+                #         decode_latency,
+                #         decode_end - profiling_start,
+                #         cpu_after_profile,
+                #         mem_after_profile,
+                #         cpu_after_decode,
+                #         mem_after_decode
+                #     ])
 
                 self._skip_scheduling_next_step = False
                 
@@ -1581,6 +1583,38 @@ class LLMEngine:
             # queued control plane messages, such as add/remove lora adapters.
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
+
+        if self.engine_step_count % 10 == 0:
+            stats = self._get_stats(scheduler_outputs)
+
+            # Safe aggregations
+            total_prefill_time = sum(stats.time_prefill_requests)
+            total_decode_time = sum(stats.time_decode_requests)
+            total_output_tokens = stats.num_generation_tokens_requests
+            total_prompt_tokens = stats.num_prompt_tokens_requests
+            total_requests = stats.n_requests
+
+            avg_time_per_token = (
+                statistics.mean(stats.time_per_output_tokens_iter)
+                if stats.time_per_output_tokens_iter else 0.0
+            )
+            throughput = (
+                sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
+                if sum(stats.time_decode_requests) > 0 else 0.0
+            )
+
+            print(f"== Engine Stats (Step {self.engine_step_count}) ==")
+            print(f"Total prefill time:      {total_prefill_time:.4f} s")
+            print(f"Total decode time:       {total_decode_time:.4f} s")
+            print(f"Prompt tokens:           {sum(total_prompt_tokens)}")
+            print(f"Generated tokens:        {sum(total_output_tokens)}")
+            print(f"Total requests:          {total_requests}")
+            print(f"Avg time per token:      {avg_time_per_token:.4f} s")
+            print(f"Throughput:              {throughput:.2f} tokens/sec")
+
+
+
+        self.engine_step_count += 1
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
