@@ -31,6 +31,14 @@ for model in "${MODELS[@]}"; do
           echo "[SKIP] sharegpt.json not found. Skipping $exp_name."
           continue
         fi
+        cat > output/vllm_benchmark_meta.json <<EOF
+        {
+          "model": "$model",
+          "dataset": "$dataset",
+          "request_rate": "$rate",
+          "num_prompts": "$num"
+        }
+EOF
 
         # === Wait for server to come up ===
         echo "[INFO] Checking if server is ready at $HOST:$PORT..."

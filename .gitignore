@@ -207,3 +207,4 @@ shellcheck*/
 
 sharegpt.json
 *.trace.json
+output/

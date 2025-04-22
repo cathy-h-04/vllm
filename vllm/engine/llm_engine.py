@@ -68,6 +68,7 @@ import psutil
 import os
 import csv
 from statistics import mean
+import json
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -1358,6 +1359,25 @@ class LLMEngine:
 
         self.engine_step_count += 1
         step_id = self.engine_step_count
+
+        # === Load benchmark metadata ===
+        meta = {
+            "model": "unknown",
+            "dataset": "unknown",
+            "request_rate": "unknown",
+            "num_prompts": "unknown"
+        }
+        try:
+            with open("output/vllm_benchmark_meta.json", "r") as f:
+                meta.update(json.load(f))
+                print(f"[INFO] Loaded metadata for step {step_id}: {meta}")
+        except Exception:
+            print("[WARNING] Failed to load benchmark metadata.")
+
+        model = meta["model"]
+        dataset = meta["dataset"]
+        request_rate = meta["request_rate"]
+        num_prompts = meta["num_prompts"]
         profile_log = os.getenv("VLLM_PROFILE_LOG", "output/vllm_profile.csv")
         decode_log = os.getenv("VLLM_DECODE_LOG", "output/vllm_decode.csv")
 
@@ -1379,9 +1399,10 @@ class LLMEngine:
         ctx.request_outputs.clear()
 
         for path, header in [
-                (profile_log, ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb"]),
-                (decode_log, ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb"])
-            ]:
+                (profile_log, ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb", "model", "dataset", "request_rate", "num_prompts"]),
+                (decode_log, ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb", "model", "dataset", "request_rate", "num_prompts"])
+        ]:
+
                 if not os.path.exists(path):
                     os.makedirs(os.path.dirname(path), exist_ok=True)
                     with open(path, "w", newline="") as f:
@@ -1421,7 +1442,11 @@ class LLMEngine:
                     step_id,
                     round(profiling_time_ms, 2),
                     cpu_after_profile,
-                    round(mem_after_profile, 3)
+                    round(mem_after_profile, 3),
+                    model,
+                    dataset,
+                    request_rate,
+                    num_prompts
                 ])
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
@@ -1501,13 +1526,15 @@ class LLMEngine:
                     writer = csv.writer(f)
                     writer.writerow([
                         step_id,
+                        step_id,
                         round(decode_time_ms, 2),
                         cpu_after_decode,
-                        round(mem_after_decode, 3)
+                        round(mem_after_decode, 3),
+                        model,
+                        dataset,
+                        request_rate,
+                        num_prompts
                     ])
-
-                print(f"[DONE] Step {step_id}: completed {len(scheduler_outputs.scheduled_seq_groups)} request(s)")
-
                 
                 self._skip_scheduling_next_step = False
                 
@@ -1743,7 +1770,33 @@ class LLMEngine:
                 print(f"Throughput:              {throughput:.2f} tokens/sec")
 
         # === Optional: Log raw CSV for offline analysis ===
-        log_path = os.getenv("VLLM_LOG_PATH", "output/vllm_stats.csv")
+        meta_path = "output/vllm_benchmark_meta.json"
+        meta = {
+            "model": "unknown",
+            "dataset": "unknown",
+            "request_rate": "unknown",
+            "num_prompts": "unknown"
+        }
+
+        try:
+            with open(meta_path, "r") as f:
+                loaded = json.load(f)
+                print(f"[DEBUG] Loaded benchmark metadata from {meta_path}: {loaded}")
+
+                if isinstance(loaded, dict):
+                    meta.update(loaded)
+                else:
+                    print(f"[WARNING] Invalid format in {meta_path}: expected a dictionary.")
+        except Exception as e:
+            print(f"[WARNING] Failed to load benchmark meta data from {meta_path}: {e}")
+
+        model = meta["model"]
+        dataset = meta["dataset"]
+        request_rate = meta["request_rate"]
+        num_prompts = meta["num_prompts"]
+
+        # Prepare output log path
+        log_path = os.getenv("VLLM_LOG_PATH", "output/vllm_stats_experiments.csv")
         if not os.path.exists(log_path):
             os.makedirs(os.path.dirname(log_path), exist_ok=True)
             with open(log_path, "w", newline="") as f:
@@ -1768,11 +1821,12 @@ class LLMEngine:
                 mean(stats.time_per_output_tokens_iter) if stats.time_per_output_tokens_iter else 0.0,
                 sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
                     if sum(stats.time_decode_requests) > 0 else 0.0,
-                self.model_config.model,
-                os.getenv("BENCHMARK_DATASET", "unknown"),
-                os.getenv("BENCHMARK_RATE", "unknown"),
-                os.getenv("BENCHMARK_PROMPTS", "unknown"),
+                model,
+                dataset,
+                request_rate,
+                num_prompts
             ])
+
 
 
     def _get_stats(self,

@@ -142,7 +142,7 @@ async def build_async_engine_client(
     # Context manager to handle engine_client lifecycle
     # Ensures everything is shutdown and cleaned up on error/exit
     engine_args = AsyncEngineArgs.from_cli_args(args)
-
+    
     async with build_async_engine_client_from_engine_args(
             engine_args, args.disable_frontend_multiprocessing) as engine:
         yield engine
