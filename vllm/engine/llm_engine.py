@@ -1751,7 +1751,8 @@ class LLMEngine:
                 writer.writerow([
                     "step", "prefill_time", "decode_time", "e2e_time",
                     "prompt_tokens", "gen_tokens", "total_requests",
-                    "avg_token_latency", "throughput_tokens_per_s"
+                    "avg_token_latency", "throughput_tokens_per_s",
+                    "model", "dataset", "request_rate", "num_prompts"
                 ])
 
         with open(log_path, "a", newline="") as f:
@@ -1766,8 +1767,13 @@ class LLMEngine:
                 len(stats.n_requests),
                 mean(stats.time_per_output_tokens_iter) if stats.time_per_output_tokens_iter else 0.0,
                 sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
-                    if sum(stats.time_decode_requests) > 0 else 0.0
+                    if sum(stats.time_decode_requests) > 0 else 0.0,
+                self.model_config.model,
+                os.getenv("BENCHMARK_DATASET", "unknown"),
+                os.getenv("BENCHMARK_RATE", "unknown"),
+                os.getenv("BENCHMARK_PROMPTS", "unknown"),
             ])
+
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],
