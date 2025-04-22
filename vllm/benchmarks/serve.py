@@ -805,6 +805,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
 
 
 def main(args: argparse.Namespace):
+    print("🔥 [DEBUG] Entered main(). Args:")
     print(args)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -851,30 +852,34 @@ def main(args: argparse.Namespace):
     gc.collect()
     gc.freeze()
 
-    benchmark_result = asyncio.run(
-        benchmark(
-            endpoint_type=endpoint_type,
-            api_url=api_url,
-            base_url=base_url,
-            model_id=model_id,
-            model_name=model_name,
-            tokenizer=tokenizer,
-            input_requests=input_requests,
-            logprobs=args.logprobs,
-            best_of=args.best_of,
-            request_rate=args.request_rate,
-            burstiness=args.burstiness,
-            disable_tqdm=args.disable_tqdm,
-            profile=args.profile,
-            selected_percentile_metrics=args.percentile_metrics.split(","),
-            selected_percentiles=[
-                float(p) for p in args.metric_percentiles.split(",")
-            ],
-            ignore_eos=args.ignore_eos,
-            goodput_config_dict=goodput_config_dict,
-            max_concurrency=args.max_concurrency,
-            lora_modules=args.lora_modules,
-        ))
+    try:
+        benchmark_result = asyncio.run(
+            benchmark(
+                endpoint_type=endpoint_type,
+                api_url=api_url,
+                base_url=base_url,
+                model_id=model_id,
+                model_name=model_name,
+                tokenizer=tokenizer,
+                input_requests=input_requests,
+                logprobs=args.logprobs,
+                best_of=args.best_of,
+                request_rate=args.request_rate,
+                burstiness=args.burstiness,
+                disable_tqdm=args.disable_tqdm,
+                profile=args.profile,
+                selected_percentile_metrics=args.percentile_metrics.split(","),
+                selected_percentiles=[
+                    float(p) for p in args.metric_percentiles.split(",")
+                ],
+                ignore_eos=args.ignore_eos,
+                goodput_config_dict=goodput_config_dict,
+                max_concurrency=args.max_concurrency,
+                lora_modules=args.lora_modules,
+            ))
+    except Exception as e:
+        print(f"[FATAL] Benchmark failed: {e}")
+        raise
 
     # Save config and results to json
     if args.save_result:
@@ -923,3 +928,9 @@ def main(args: argparse.Namespace):
         with open(file_name, "w", encoding='utf-8') as outfile:
             json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)
+    args = parser.parse_args()
+    main(args)

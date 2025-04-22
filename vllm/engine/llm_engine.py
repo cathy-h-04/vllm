@@ -67,7 +67,7 @@ from vllm.worker.model_runner_base import InputProcessingError
 import psutil
 import os
 import csv
-import statistics
+from statistics import mean
 
 logger = init_logger(__name__)
 _LOCAL_LOGGING_INTERVAL_SEC = 5
@@ -1356,6 +1356,12 @@ class LLMEngine:
                 "Pipeline parallelism is only supported through AsyncLLMEngine "
                 "as performance will be severely degraded otherwise.")
 
+        self.engine_step_count += 1
+        step_id = self.engine_step_count
+        profile_log = os.getenv("VLLM_PROFILE_LOG", "output/vllm_profile.csv")
+        decode_log = os.getenv("VLLM_DECODE_LOG", "output/vllm_decode.csv")
+
+
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
@@ -1372,6 +1378,16 @@ class LLMEngine:
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
 
+        for path, header in [
+                (profile_log, ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb"]),
+                (decode_log, ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb"])
+            ]:
+                if not os.path.exists(path):
+                    os.makedirs(os.path.dirname(path), exist_ok=True)
+                    with open(path, "w", newline="") as f:
+                        writer = csv.writer(f)
+                        writer.writerow(header)
+
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
         # batch has completed.
@@ -1380,13 +1396,14 @@ class LLMEngine:
         if not self._has_remaining_steps(
                 seq_group_metadata_list
         ) and not self._skip_scheduling_next_step:
-            
-            # === Profiling Phase ===
+
+            # Grab system process info
             proc = psutil.Process(os.getpid())
 
+            # --- Profiling phase timing ---
             profiling_start = time.perf_counter()
             cpu_before_profile = proc.cpu_percent(interval=None)
-            mem_before_profile = proc.memory_info().rss / 1024**3 
+            mem_before_profile = proc.memory_info().rss / 1024**3  # in GB
 
             # Schedule iteration
             (seq_group_metadata_list, scheduler_outputs,
@@ -1396,7 +1413,16 @@ class LLMEngine:
             profiling_end = time.perf_counter()
             cpu_after_profile = proc.cpu_percent(interval=None)
             mem_after_profile = proc.memory_info().rss / 1024**3
-            profiling_latency = profiling_end - profiling_start
+            profiling_time_ms = (profiling_end - profiling_start) * 1000
+
+            with open(profile_log, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    step_id,
+                    round(profiling_time_ms, 2),
+                    cpu_after_profile,
+                    round(mem_after_profile, 3)
+                ])
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1426,8 +1452,11 @@ class LLMEngine:
         assert seq_group_metadata_list is not None
         assert scheduler_outputs is not None
 
-        if not scheduler_outputs.is_empty():
+        if scheduler_outputs.is_empty():
+            print(f"[SKIP] Step {step_id}: No decode scheduled.")
+            return ctx.request_outputs
 
+        if not scheduler_outputs.is_empty():
             # Check if we have a cached last_output from the previous iteration.
             # For supporting PP this is probably the best way to pass the
             # sampled_token_ids, as a separate broadcast over all the PP stages
@@ -1453,50 +1482,33 @@ class LLMEngine:
 
             try:
                 # === Decode Phase ===
-                
-                # decode_start = time.perf_counter()
-                # cpu_before_decode = proc.cpu_percent(interval=None)
-                # mem_before_decode = proc.memory_info().rss / 1024**3
+                proc = psutil.Process(os.getpid())
+                decode_start = time.perf_counter()
+                cpu_before_decode = proc.cpu_percent(interval=None)
+                mem_before_decode = proc.memory_info().rss / 1024**3
 
-    
                 outputs = self.model_executor.execute_model(
                     execute_model_req=execute_model_req)
                 
-                # decode_end = time.perf_counter()
-                # cpu_after_decode = proc.cpu_percent(interval=None)
-                # mem_after_decode = proc.memory_info().rss / 1024**3
-                # decode_latency = decode_end - decode_start
-                
+                decode_end = time.perf_counter()
+                cpu_after_decode = proc.cpu_percent(interval=None)
+                mem_after_decode = proc.memory_info().rss / 1024**3
+                decode_time_ms = (decode_end - decode_start) * 1000
+                total_time_ms = (decode_end - profiling_start) * 1000
                 
                 # === Logging Metrics ===
-                # log_file = os.getenv("VLLM_LOG_PATH", "output/vllm_log.csv")
+                with open(decode_log, "a", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        step_id,
+                        round(decode_time_ms, 2),
+                        cpu_after_decode,
+                        round(mem_after_decode, 3)
+                    ])
 
-                # if not os.path.exists(log_file):
-                #     os.makedirs(os.path.dirname(log_file), exist_ok=True)
-                #     with open(log_file, "w", newline="") as f:
-                #         writer = csv.writer(f)
-                #         writer.writerow([
-                #             "profiling_time_s",
-                #             "decode_time_s",
-                #             "total_time_s",
-                #             "cpu_profile_pct",
-                #             "mem_profile_gb",
-                #             "cpu_decode_pct",
-                #             "mem_decode_gb"
-                #         ])
+                print(f"[DONE] Step {step_id}: completed {len(scheduler_outputs.scheduled_seq_groups)} request(s)")
 
-                # with open(log_file, "a", newline="") as f:
-                #     writer = csv.writer(f)
-                #     writer.writerow([
-                #         profiling_latency,
-                #         decode_latency,
-                #         decode_end - profiling_start,
-                #         cpu_after_profile,
-                #         mem_after_profile,
-                #         cpu_after_decode,
-                #         mem_after_decode
-                #     ])
-
+                
                 self._skip_scheduling_next_step = False
                 
             except InputProcessingError as e:
@@ -1584,37 +1596,6 @@ class LLMEngine:
             logger.debug("Stopping remote worker execution loop.")
             self.model_executor.stop_remote_worker_execution_loop()
 
-        if self.engine_step_count % 10 == 0:
-            stats = self._get_stats(scheduler_outputs)
-
-            # Safe aggregations
-            total_prefill_time = sum(stats.time_prefill_requests)
-            total_decode_time = sum(stats.time_decode_requests)
-            total_output_tokens = stats.num_generation_tokens_requests
-            total_prompt_tokens = stats.num_prompt_tokens_requests
-            total_requests = stats.n_requests
-
-            avg_time_per_token = (
-                statistics.mean(stats.time_per_output_tokens_iter)
-                if stats.time_per_output_tokens_iter else 0.0
-            )
-            throughput = (
-                sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
-                if sum(stats.time_decode_requests) > 0 else 0.0
-            )
-
-            print(f"== Engine Stats (Step {self.engine_step_count}) ==")
-            print(f"Total prefill time:      {total_prefill_time:.4f} s")
-            print(f"Total decode time:       {total_decode_time:.4f} s")
-            print(f"Prompt tokens:           {sum(total_prompt_tokens)}")
-            print(f"Generated tokens:        {sum(total_output_tokens)}")
-            print(f"Total requests:          {total_requests}")
-            print(f"Avg time per token:      {avg_time_per_token:.4f} s")
-            print(f"Throughput:              {throughput:.2f} tokens/sec")
-
-
-
-        self.engine_step_count += 1
         return ctx.request_outputs
 
     def _abort_and_cache_schedule(
@@ -1724,16 +1705,69 @@ class LLMEngine:
         del self.stat_loggers[logger_name]
 
     def do_log_stats(self,
-                     scheduler_outputs: Optional[SchedulerOutputs] = None,
-                     model_output: Optional[List[SamplerOutput]] = None,
-                     finished_before: Optional[List[int]] = None,
-                     skip: Optional[List[int]] = None) -> None:
+                    scheduler_outputs: Optional[SchedulerOutputs] = None,
+                    model_output: Optional[List[SamplerOutput]] = None,
+                    finished_before: Optional[List[int]] = None,
+                    skip: Optional[List[int]] = None) -> None:
         """Forced log when no requests active."""
-        if self.log_stats:
-            stats = self._get_stats(scheduler_outputs, model_output,
-                                    finished_before, skip)
-            for logger in self.stat_loggers.values():
-                logger.log(stats)
+
+        if not self.log_stats:
+            return
+
+        stats = self._get_stats(scheduler_outputs, model_output,
+                                finished_before, skip)
+
+        prompt_tokens = sum(stats.num_prompt_tokens_requests)
+        gen_tokens = sum(stats.num_generation_tokens_requests)
+
+        # 🔥 Skip idle steps: no prompt or generated tokens
+        if prompt_tokens == 0 and gen_tokens == 0:
+            return
+
+        # === Always log to registered StatLoggers ===
+        for logger in self.stat_loggers.values():
+            logger.log(stats)
+
+        # === Optional: Structured print summary every N steps ===
+        if self.engine_step_count % 10 == 0:
+            print(f"\n== Engine Stats (Step {self.engine_step_count}) ==")
+            print(f"Total prefill time:      {sum(stats.time_prefill_requests):.4f} s")
+            print(f"Total decode time:       {sum(stats.time_decode_requests):.4f} s")
+            print(f"Prompt tokens:           {sum(stats.num_prompt_tokens_requests)}")
+            print(f"Generated tokens:        {sum(stats.num_generation_tokens_requests)}")
+            print(f"Total requests:          {len(stats.n_requests)}")
+            if stats.time_per_output_tokens_iter:
+                print(f"Avg time per token:      {mean(stats.time_per_output_tokens_iter):.4f} s")
+            if sum(stats.time_decode_requests) > 0:
+                throughput = sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
+                print(f"Throughput:              {throughput:.2f} tokens/sec")
+
+        # === Optional: Log raw CSV for offline analysis ===
+        log_path = os.getenv("VLLM_LOG_PATH", "output/vllm_stats.csv")
+        if not os.path.exists(log_path):
+            os.makedirs(os.path.dirname(log_path), exist_ok=True)
+            with open(log_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "step", "prefill_time", "decode_time", "e2e_time",
+                    "prompt_tokens", "gen_tokens", "total_requests",
+                    "avg_token_latency", "throughput_tokens_per_s"
+                ])
+
+        with open(log_path, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([
+                self.engine_step_count,
+                sum(stats.time_prefill_requests),
+                sum(stats.time_decode_requests),
+                sum(stats.time_e2e_requests),
+                sum(stats.num_prompt_tokens_requests),
+                sum(stats.num_generation_tokens_requests),
+                len(stats.n_requests),
+                mean(stats.time_per_output_tokens_iter) if stats.time_per_output_tokens_iter else 0.0,
+                sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
+                    if sum(stats.time_decode_requests) > 0 else 0.0
+            ])
 
     def _get_stats(self,
                    scheduler_outputs: Optional[SchedulerOutputs],

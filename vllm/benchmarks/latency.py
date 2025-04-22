@@ -179,3 +179,11 @@ def main(args: argparse.Namespace):
         with open(args.output_json, "w") as f:
             json.dump(results, f, indent=4)
         save_to_pytorch_benchmark_format(args, results)
+
+if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser()
+    add_cli_args(parser)  # from existing function in the script
+    args = parser.parse_args()
+    main(args)
+    print("[✓] Profiling run completed.")
