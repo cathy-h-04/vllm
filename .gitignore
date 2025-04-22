@@ -203,3 +203,7 @@ benchmarks/**/*.json
 # Linting
 actionlint
 shellcheck*/
+
+
+sharegpt.json
+*.trace.json
