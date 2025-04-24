@@ -1,0 +1,7 @@
+{
+    "model": "facebook/opt-125m",
+    "dataset": "sharegpt",
+    "request_rate": "5",
+    "num_prompts": "10"
+  }
+  

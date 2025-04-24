@@ -112,6 +112,9 @@ async def init_app(
               if llm_engine is not None else AsyncLLMEngine.from_engine_args(
                   engine_args, usage_context=UsageContext.API_SERVER))
 
+    if hasattr(engine.llm_engine, "init_benchmark_metadata"):
+        engine.llm_engine.init_benchmark_metadata()
+
     return app
 
 

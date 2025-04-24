@@ -430,7 +430,88 @@ class LLMEngine:
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
         self.engine_step_count = 0
+        self.metadata_initialized = False
+        self.metadata = {}
+        self.current_exp_name = None
 
+    
+    def _init_metadata_from_env(self):
+        # === Get and validate BENCHMARK_TYPE ===
+        self.benchmark_type = os.environ["BENCHMARK_TYPE"].lower()
+
+        # === Define required keys per benchmark type ===
+        required_keys = {
+            "serving": [
+                "BENCHMARK_MODEL", "BENCHMARK_RATE", "BENCHMARK_NUM_PROMPTS",
+                "BENCHMARK_MAX_CONCURRENCY", "BENCHMARK_BURSTINESS", "BENCHMARK_IGNORE_EOS"
+            ],
+            "latency": [
+                "BENCHMARK_MODEL", "BENCHMARK_INPUT_LEN",
+                "BENCHMARK_OUTPUT_LEN", "BENCHMARK_DATASET",
+                "BATCH_SIZE", "NUM_ITERS", "NUM_ITERS_WARMUP",
+            ],
+            "throughput": [
+                "BENCHMARK_MODEL", "BENCHMARK_BATCH",
+                "BENCHMARK_SEQ_LEN", "BENCHMARK_DATASET"
+            ]
+        }
+
+        if self.benchmark_type not in required_keys:
+            raise RuntimeError(f"[ERROR] Unknown BENCHMARK_TYPE: {self.benchmark_type}")
+
+        # === Fail fast if required variables are missing ===
+        for key in required_keys[self.benchmark_type]:
+            if key not in os.environ:
+                raise RuntimeError(f"[ERROR] Required environment variable '{key}' is not set")
+
+        # === Populate metadata for each type ===
+        if self.benchmark_type == "serving":
+            self.metadata = {
+                "model": os.environ["BENCHMARK_MODEL"],
+                "dataset": os.environ["BENCHMARK_DATASET"],
+                "request_rate": os.environ["BENCHMARK_RATE"],
+                "num_prompts": os.environ["BENCHMARK_NUM_PROMPTS"],
+                "max_concurrency": os.environ["BENCHMARK_MAX_CONCURRENCY"],
+                "burstiness": os.environ["BENCHMARK_BURSTINESS"],
+                "ignore_eos": os.environ["BENCHMARK_IGNORE_EOS"]
+            }
+            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
+
+        elif self.benchmark_type == "latency":
+            self.metadata = {
+                "model": os.environ["BENCHMARK_MODEL"],
+                "input_len": os.environ["BENCHMARK_INPUT_LEN"],
+                "output_len": os.environ["BENCHMARK_OUTPUT_LEN"],
+                "dataset": os.environ["BENCHMARK_DATASET"],
+                "batch_size": os.environ["BATCH_SIZE"],
+                "num_iters": os.environ["NUM_ITERS"],
+                "num_iters_warmup": os.environ["NUM_ITERS_WARMUP"]
+            }
+            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
+
+        elif self.benchmark_type == "throughput":
+            self.metadata = {
+                "model": os.environ["BENCHMARK_MODEL"],
+                "batch_size": os.environ["BENCHMARK_BATCH"],
+                "seq_len": os.environ["BENCHMARK_SEQ_LEN"],
+                "dataset": os.environ["BENCHMARK_DATASET"]
+            }
+            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
+
+        # === Shared metadata (always logged) ===
+        pc = self.vllm_config.parallel_config
+        self.metadata["tensor_parallel"] = str(pc.tensor_parallel_size)
+        self.metadata["pipeline_parallel"] = str(pc.pipeline_parallel_size)
+        self.metadata["data_parallel"] = str(pc.data_parallel_size)
+        self.metadata["gpu_count"] = os.environ.get("BENCHMARK_GPU_COUNT", "unknown")
+
+        os.makedirs(os.path.dirname(self.stat_log_path), exist_ok=True)
+
+    def init_benchmark_metadata(self):
+        """Public hook to initialize benchmark metadata manually."""
+        self._init_metadata_from_env()
+
+    
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
 
@@ -759,6 +840,7 @@ class LLMEngine:
             >>> # continue the request processing
             >>> ...
         """
+
         if inputs is not None:
             prompt = inputs
         assert prompt is not None and params is not None
@@ -1360,28 +1442,6 @@ class LLMEngine:
         self.engine_step_count += 1
         step_id = self.engine_step_count
 
-        # === Load benchmark metadata ===
-        meta = {
-            "model": "unknown",
-            "dataset": "unknown",
-            "request_rate": "unknown",
-            "num_prompts": "unknown"
-        }
-        try:
-            with open("output/vllm_benchmark_meta.json", "r") as f:
-                meta.update(json.load(f))
-                print(f"[INFO] Loaded metadata for step {step_id}: {meta}")
-        except Exception:
-            print("[WARNING] Failed to load benchmark metadata.")
-
-        model = meta["model"]
-        dataset = meta["dataset"]
-        request_rate = meta["request_rate"]
-        num_prompts = meta["num_prompts"]
-        profile_log = os.getenv("VLLM_PROFILE_LOG", "output/vllm_profile.csv")
-        decode_log = os.getenv("VLLM_DECODE_LOG", "output/vllm_decode.csv")
-
-
         # For llm_engine, there is no pipeline parallel support, so the engine
         # used is always 0.
         virtual_engine = 0
@@ -1398,16 +1458,22 @@ class LLMEngine:
         # Clear outputs for each new scheduler iteration
         ctx.request_outputs.clear()
 
-        for path, header in [
-                (profile_log, ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb", "model", "dataset", "request_rate", "num_prompts"]),
-                (decode_log, ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb", "model", "dataset", "request_rate", "num_prompts"])
-        ]:
+        # === Load required logging paths from environment ===
+        profile_log = os.environ["VLLM_PROFILE_LOG"]
+        decode_log = os.environ["VLLM_DECODE_LOG"]
 
-                if not os.path.exists(path):
-                    os.makedirs(os.path.dirname(path), exist_ok=True)
-                    with open(path, "w", newline="") as f:
-                        writer = csv.writer(f)
-                        writer.writerow(header)
+        # === Consistent metadata field order ===
+        meta_keys = sorted(self.metadata.keys())
+
+        # === Define headers dynamically ===
+        profile_header = ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb"] + meta_keys
+        decode_header = ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb"] + meta_keys
+
+        for path, header in [(profile_log, profile_header), (decode_log, decode_header)]:
+            if not os.path.exists(path):
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "w", newline="") as f:
+                    csv.writer(f).writerow(header)
 
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
@@ -1436,18 +1502,15 @@ class LLMEngine:
             mem_after_profile = proc.memory_info().rss / 1024**3
             profiling_time_ms = (profiling_end - profiling_start) * 1000
 
+            profiling_row = [
+                step_id,
+                round(profiling_time_ms, 2),
+                cpu_after_profile,
+                round(mem_after_profile, 3)
+            ] + [self.metadata.get(k, "") for k in meta_keys]
+
             with open(profile_log, "a", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    step_id,
-                    round(profiling_time_ms, 2),
-                    cpu_after_profile,
-                    round(mem_after_profile, 3),
-                    model,
-                    dataset,
-                    request_rate,
-                    num_prompts
-                ])
+                csv.writer(f).writerow(profiling_row)
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1522,19 +1585,16 @@ class LLMEngine:
                 total_time_ms = (decode_end - profiling_start) * 1000
                 
                 # === Logging Metrics ===
+                decode_row = [
+                    step_id,
+                    round(decode_time_ms, 2),
+                    cpu_after_decode,
+                    round(mem_after_decode, 3)
+                ] + [self.metadata.get(k, "") for k in meta_keys]
+
                 with open(decode_log, "a", newline="") as f:
-                    writer = csv.writer(f)
-                    writer.writerow([
-                        step_id,
-                        step_id,
-                        round(decode_time_ms, 2),
-                        cpu_after_decode,
-                        round(mem_after_decode, 3),
-                        model,
-                        dataset,
-                        request_rate,
-                        num_prompts
-                    ])
+                    csv.writer(f).writerow(decode_row)
+
                 
                 self._skip_scheduling_next_step = False
                 
@@ -1747,7 +1807,7 @@ class LLMEngine:
         prompt_tokens = sum(stats.num_prompt_tokens_requests)
         gen_tokens = sum(stats.num_generation_tokens_requests)
 
-        # 🔥 Skip idle steps: no prompt or generated tokens
+        # Skip idle steps: no prompt or generated tokens
         if prompt_tokens == 0 and gen_tokens == 0:
             return
 
@@ -1755,77 +1815,50 @@ class LLMEngine:
         for logger in self.stat_loggers.values():
             logger.log(stats)
 
-        # === Optional: Structured print summary every N steps ===
-        if self.engine_step_count % 10 == 0:
-            print(f"\n== Engine Stats (Step {self.engine_step_count}) ==")
-            print(f"Total prefill time:      {sum(stats.time_prefill_requests):.4f} s")
-            print(f"Total decode time:       {sum(stats.time_decode_requests):.4f} s")
-            print(f"Prompt tokens:           {sum(stats.num_prompt_tokens_requests)}")
-            print(f"Generated tokens:        {sum(stats.num_generation_tokens_requests)}")
-            print(f"Total requests:          {len(stats.n_requests)}")
-            if stats.time_per_output_tokens_iter:
-                print(f"Avg time per token:      {mean(stats.time_per_output_tokens_iter):.4f} s")
-            if sum(stats.time_decode_requests) > 0:
-                throughput = sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
-                print(f"Throughput:              {throughput:.2f} tokens/sec")
+        # === Log raw CSV for offline analysis ===
+        meta = self.metadata
+        stat_log_path = os.getenv("VLLM_STAT_LOG")
+        dir_path = os.path.dirname(stat_log_path)
 
-        # === Optional: Log raw CSV for offline analysis ===
-        meta_path = "output/vllm_benchmark_meta.json"
-        meta = {
-            "model": "unknown",
-            "dataset": "unknown",
-            "request_rate": "unknown",
-            "num_prompts": "unknown"
-        }
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
 
-        try:
-            with open(meta_path, "r") as f:
-                loaded = json.load(f)
-                print(f"[DEBUG] Loaded benchmark metadata from {meta_path}: {loaded}")
+        core_header = [
+            "step", "prefill_time", "decode_time", "e2e_time", 
+            "prompt_tokens", "gen_tokens", "total_requests", 
+            "num_tokens_iter", "avg_ttft", "avg_token_latency", 
+            "queue_time", "model_forward_time", "throughput_tokens_per_s"
+        ]
+        core_row = [
+            self.engine_step_count,
+            sum(stats.time_prefill_requests),
+            sum(stats.time_decode_requests),
+            sum(stats.time_e2e_requests),
+            sum(stats.num_prompt_tokens_requests),
+            sum(stats.num_generation_tokens_requests),
+            len(stats.n_requests),
+            stats.num_tokens_iter,
+            mean(stats.time_to_first_tokens_iter) if stats.time_to_first_tokens_iter else 0.0,
+            mean(stats.time_per_output_tokens_iter) if stats.time_per_output_tokens_iter else 0.0,
+            mean(stats.time_queue_requests) if stats.time_queue_requests else 0.0,
+            mean(stats.model_forward_time_requests) if stats.model_forward_time_requests else 0.0,
+            (sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests))
+                if sum(stats.time_decode_requests) > 0 else 0.0,
+        ]
 
-                if isinstance(loaded, dict):
-                    meta.update(loaded)
-                else:
-                    print(f"[WARNING] Invalid format in {meta_path}: expected a dictionary.")
-        except Exception as e:
-            print(f"[WARNING] Failed to load benchmark meta data from {meta_path}: {e}")
+        meta_keys = sorted(meta.keys())  
+        meta_row = [meta.get(k, "") for k in meta_keys]
 
-        model = meta["model"]
-        dataset = meta["dataset"]
-        request_rate = meta["request_rate"]
-        num_prompts = meta["num_prompts"]
+        full_header = core_header + meta_keys
+        full_row = core_row + meta_row
 
-        # Prepare output log path
-        log_path = os.getenv("VLLM_LOG_PATH", "output/vllm_stats_experiments.csv")
-        if not os.path.exists(log_path):
-            os.makedirs(os.path.dirname(log_path), exist_ok=True)
-            with open(log_path, "w", newline="") as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    "step", "prefill_time", "decode_time", "e2e_time",
-                    "prompt_tokens", "gen_tokens", "total_requests",
-                    "avg_token_latency", "throughput_tokens_per_s",
-                    "model", "dataset", "request_rate", "num_prompts"
-                ])
+        if not os.path.exists(stat_log_path):
+            os.makedirs(os.path.dirname(stat_log_path), exist_ok=True)
+            with open(stat_log_path, "w", newline="") as f:
+                csv.writer(f).writerow(full_header)
 
-        with open(log_path, "a", newline="") as f:
-            writer = csv.writer(f)
-            writer.writerow([
-                self.engine_step_count,
-                sum(stats.time_prefill_requests),
-                sum(stats.time_decode_requests),
-                sum(stats.time_e2e_requests),
-                sum(stats.num_prompt_tokens_requests),
-                sum(stats.num_generation_tokens_requests),
-                len(stats.n_requests),
-                mean(stats.time_per_output_tokens_iter) if stats.time_per_output_tokens_iter else 0.0,
-                sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests)
-                    if sum(stats.time_decode_requests) > 0 else 0.0,
-                model,
-                dataset,
-                request_rate,
-                num_prompts
-            ])
+        with open(stat_log_path, "a", newline="") as f:
+            csv.writer(f).writerow(full_row)
 
 
 

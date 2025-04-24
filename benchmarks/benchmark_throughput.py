@@ -30,6 +30,9 @@ from vllm.sampling_params import BeamSearchParams
 from vllm.utils import FlexibleArgumentParser, merge_async_iterators
 
 
+log_path = os.path.join("output", "vllm_stats_throughput.csv")
+os.environ["VLLM_LOG_PATH"] = log_path
+
 def run_vllm(
     requests: list[SampleRequest],
     n: int,
