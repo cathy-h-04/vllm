@@ -430,87 +430,7 @@ class LLMEngine:
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
         self.engine_step_count = 0
-        self.metadata_initialized = False
-        self.metadata = {}
-        self.current_exp_name = None
-
-    
-    def _init_metadata_from_env(self):
-        # === Get and validate BENCHMARK_TYPE ===
-        self.benchmark_type = os.environ["BENCHMARK_TYPE"].lower()
-
-        # === Define required keys per benchmark type ===
-        required_keys = {
-            "serving": [
-                "BENCHMARK_MODEL", "BENCHMARK_RATE", "BENCHMARK_NUM_PROMPTS",
-                "BENCHMARK_MAX_CONCURRENCY", "BENCHMARK_BURSTINESS", "BENCHMARK_IGNORE_EOS"
-            ],
-            "latency": [
-                "BENCHMARK_MODEL", "BENCHMARK_INPUT_LEN",
-                "BENCHMARK_OUTPUT_LEN", "BENCHMARK_DATASET",
-                "BATCH_SIZE", "NUM_ITERS", "NUM_ITERS_WARMUP",
-            ],
-            "throughput": [
-                "BENCHMARK_MODEL", "BENCHMARK_BATCH",
-                "BENCHMARK_SEQ_LEN", "BENCHMARK_DATASET"
-            ]
-        }
-
-        if self.benchmark_type not in required_keys:
-            raise RuntimeError(f"[ERROR] Unknown BENCHMARK_TYPE: {self.benchmark_type}")
-
-        # === Fail fast if required variables are missing ===
-        for key in required_keys[self.benchmark_type]:
-            if key not in os.environ:
-                raise RuntimeError(f"[ERROR] Required environment variable '{key}' is not set")
-
-        # === Populate metadata for each type ===
-        if self.benchmark_type == "serving":
-            self.metadata = {
-                "model": os.environ["BENCHMARK_MODEL"],
-                "dataset": os.environ["BENCHMARK_DATASET"],
-                "request_rate": os.environ["BENCHMARK_RATE"],
-                "num_prompts": os.environ["BENCHMARK_NUM_PROMPTS"],
-                "max_concurrency": os.environ["BENCHMARK_MAX_CONCURRENCY"],
-                "burstiness": os.environ["BENCHMARK_BURSTINESS"],
-                "ignore_eos": os.environ["BENCHMARK_IGNORE_EOS"]
-            }
-            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
-
-        elif self.benchmark_type == "latency":
-            self.metadata = {
-                "model": os.environ["BENCHMARK_MODEL"],
-                "input_len": os.environ["BENCHMARK_INPUT_LEN"],
-                "output_len": os.environ["BENCHMARK_OUTPUT_LEN"],
-                "dataset": os.environ["BENCHMARK_DATASET"],
-                "batch_size": os.environ["BATCH_SIZE"],
-                "num_iters": os.environ["NUM_ITERS"],
-                "num_iters_warmup": os.environ["NUM_ITERS_WARMUP"]
-            }
-            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
-
-        elif self.benchmark_type == "throughput":
-            self.metadata = {
-                "model": os.environ["BENCHMARK_MODEL"],
-                "batch_size": os.environ["BENCHMARK_BATCH"],
-                "seq_len": os.environ["BENCHMARK_SEQ_LEN"],
-                "dataset": os.environ["BENCHMARK_DATASET"]
-            }
-            self.stat_log_path = os.environ["VLLM_STAT_LOG"]
-
-        # === Shared metadata (always logged) ===
-        pc = self.vllm_config.parallel_config
-        self.metadata["tensor_parallel"] = str(pc.tensor_parallel_size)
-        self.metadata["pipeline_parallel"] = str(pc.pipeline_parallel_size)
-        self.metadata["data_parallel"] = str(pc.data_parallel_size)
-        self.metadata["gpu_count"] = os.environ.get("BENCHMARK_GPU_COUNT", "unknown")
-
-        os.makedirs(os.path.dirname(self.stat_log_path), exist_ok=True)
-
-    def init_benchmark_metadata(self):
-        """Public hook to initialize benchmark metadata manually."""
-        self._init_metadata_from_env()
-
+        # No metadata logic
     
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1462,12 +1382,9 @@ class LLMEngine:
         profile_log = os.environ["VLLM_PROFILE_LOG"]
         decode_log = os.environ["VLLM_DECODE_LOG"]
 
-        # === Consistent metadata field order ===
-        meta_keys = sorted(self.metadata.keys())
-
-        # === Define headers dynamically ===
-        profile_header = ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb"] + meta_keys
-        decode_header = ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb"] + meta_keys
+        # === Define headers statically (no metadata) ===
+        profile_header = ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb", "data_parallel", "pipeline_parallel", "tensor_parallel"]
+        decode_header = ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb", "data_parallel", "pipeline_parallel", "tensor_parallel"]
 
         for path, header in [(profile_log, profile_header), (decode_log, decode_header)]:
             if not os.path.exists(path):
@@ -1502,12 +1419,17 @@ class LLMEngine:
             mem_after_profile = proc.memory_info().rss / 1024**3
             profiling_time_ms = (profiling_end - profiling_start) * 1000
 
+            pc = self.vllm_config.parallel_config
+
             profiling_row = [
                 step_id,
                 round(profiling_time_ms, 2),
                 cpu_after_profile,
-                round(mem_after_profile, 3)
-            ] + [self.metadata.get(k, "") for k in meta_keys]
+                round(mem_after_profile, 3),
+                pc.data_parallel_size,
+                pc.pipeline_parallel_size,
+                pc.tensor_parallel_size
+            ] 
 
             with open(profile_log, "a", newline="") as f:
                 csv.writer(f).writerow(profiling_row)
@@ -1589,8 +1511,11 @@ class LLMEngine:
                     step_id,
                     round(decode_time_ms, 2),
                     cpu_after_decode,
-                    round(mem_after_decode, 3)
-                ] + [self.metadata.get(k, "") for k in meta_keys]
+                    round(mem_after_decode, 3),
+                    pc.data_parallel_size,
+                    pc.pipeline_parallel_size,
+                    pc.tensor_parallel_size
+                ] 
 
                 with open(decode_log, "a", newline="") as f:
                     csv.writer(f).writerow(decode_row)
@@ -1816,18 +1741,20 @@ class LLMEngine:
             logger.log(stats)
 
         # === Log raw CSV for offline analysis ===
-        meta = self.metadata
         stat_log_path = os.getenv("VLLM_STAT_LOG")
         dir_path = os.path.dirname(stat_log_path)
 
         if dir_path and not os.path.exists(dir_path):
             os.makedirs(dir_path, exist_ok=True)
 
+        pc = self.vllm_config.parallel_config
+
         core_header = [
             "step", "prefill_time", "decode_time", "e2e_time", 
             "prompt_tokens", "gen_tokens", "total_requests", 
             "num_tokens_iter", "avg_ttft", "avg_token_latency", 
-            "queue_time", "model_forward_time", "throughput_tokens_per_s"
+            "queue_time", "model_forward_time", "throughput_tokens_per_s", 
+            "data_parallel", "pipeline_parallel", "tensor_parallel"
         ]
         core_row = [
             self.engine_step_count,
@@ -1844,21 +1771,18 @@ class LLMEngine:
             mean(stats.model_forward_time_requests) if stats.model_forward_time_requests else 0.0,
             (sum(stats.num_generation_tokens_requests) / sum(stats.time_decode_requests))
                 if sum(stats.time_decode_requests) > 0 else 0.0,
+            pc.data_parallel_size,
+            pc.pipeline_parallel_size,
+            pc.tensor_parallel_size
         ]
-
-        meta_keys = sorted(meta.keys())  
-        meta_row = [meta.get(k, "") for k in meta_keys]
-
-        full_header = core_header + meta_keys
-        full_row = core_row + meta_row
 
         if not os.path.exists(stat_log_path):
             os.makedirs(os.path.dirname(stat_log_path), exist_ok=True)
             with open(stat_log_path, "w", newline="") as f:
-                csv.writer(f).writerow(full_header)
+                csv.writer(f).writerow(core_header)
 
         with open(stat_log_path, "a", newline="") as f:
-            csv.writer(f).writerow(full_row)
+            csv.writer(f).writerow(core_row)
 
 
 

@@ -113,15 +113,15 @@ for model in "${MODELS[@]}"; do
                 case "$file" in
                   stats)
                     line_before=$stat_lines_before
-                    base_header="step,prefill_time,decode_time,e2e_time,prompt_tokens,gen_tokens,total_requests,num_tokens_iter,avg_ttft,avg_token_latency,queue_time,model_forward_time,throughput_tokens_per_s"
+                    base_header="step,prefill_time,decode_time,e2e_time,prompt_tokens,gen_tokens,total_requests,num_tokens_iter,avg_ttft,avg_token_latency,queue_time,model_forward_time,throughput_tokens_per_s,data_parallel,pipeline_parallel,tensor_parallel"
                     ;;
                   profile)
                     line_before=$profile_lines_before
-                    base_header="step_id,profiling_time_ms,cpu_profile_pct,mem_profile_gb"
+                    base_header="step_id,profiling_time_ms,cpu_profile_pct,mem_profile_gb,data_parallel,pipeline_parallel,tensor_parallel"
                     ;;
                   decode)
                     line_before=$decode_lines_before
-                    base_header="step_id,decode_time_ms,cpu_decode_pct,mem_decode_gb"
+                    base_header="step_id,decode_time_ms,cpu_decode_pct,mem_decode_gb,data_parallel,pipeline_parallel,tensor_parallel" 
                     ;;
                 esac
 
