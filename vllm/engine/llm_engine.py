@@ -447,8 +447,13 @@ class LLMEngine:
                 "BENCHMARK_INPUT_LEN", "BENCHMARK_OUTPUT_LEN",
                 "BENCHMARK_BATCH_SIZE", "BENCHMARK_GPU_COUNT"
             ]
-        else:
-            self._benchmark_metadata_keys = []
+        elif self.benchmark_type == "throughput":
+            self._benchmark_metadata_keys = [
+                "BENCHMARK_MODEL", "BENCHMARK_DATASET",
+                "BENCHMARK_INPUT_LEN", "BENCHMARK_OUTPUT_LEN",
+                "BENCHMARK_NUM_PROMPTS", "BENCHMARK_GPU_COUNT",
+                "BENCHMARK_BACKEND", "BENCHMARK_N"
+            ]
 
         self._benchmark_metadata = {
             key.replace("BENCHMARK_", "").lower(): os.environ.get(key, "")
