@@ -8,6 +8,7 @@ output_len="$4"
 num_prompts="$5"
 backend="$6"
 n="$7"
+dataset_path="$8"  # Optional
 
 short_model=$(echo "$model" | tr '/' '_')
 exp_name="${short_model}_${dataset}_in${input_len}_out${output_len}_n${n}_p${num_prompts}_${backend}_g${BENCHMARK_GPU_COUNT}"
@@ -33,6 +34,12 @@ CMD=(python benchmarks/benchmark_throughput.py
 [[ "$BENCHMARK_DISABLE_DETOKENIZE" == "True" ]] && CMD+=(--disable-detokenize)
 [[ "$BENCHMARK_ASYNC_ENGINE" == "True" ]] && CMD+=(--async-engine)
 [[ "$BENCHMARK_DISABLE_MP" == "True" ]] && CMD+=(--disable-frontend-multiprocessing)
+
+if [[ -n "$dataset_path" && ( "$dataset" == "hf" || "$dataset" == "sharegpt" ) ]]; then
+  CMD+=(--dataset-path "$dataset_path")
+fi
+[[ "$dataset" == "hf" && -n "$HF_SUBSET" ]] && CMD+=(--hf-subset "$HF_SUBSET")
+[[ "$dataset" == "hf" && -n "$HF_SPLIT" ]] && CMD+=(--hf-split "$HF_SPLIT")
 
 echo "[INFO] Running throughput benchmark: $exp_name"
 echo "[INFO] Command: ${CMD[*]}"

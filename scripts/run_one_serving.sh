@@ -11,9 +11,15 @@ dataset="$4"
 burstiness="$5"
 max_concurrency="$6"
 ignore_eos="$7"
+dataset_path="$8"  # Optional
 
 short_model=$(echo "$model" | tr '/' '_')
 exp_name="${short_model}_${dataset}_${rate}rps_${num}p_b${burstiness}_mc${max_concurrency}_eos${ignore_eos}"
+
+echo "[DEBUG] Dataset name: $dataset"
+echo "[DEBUG] Dataset path: $dataset_path"
+echo "[DEBUG] Final EXP_NAME: $exp_name"
+
 
 OUTPUT_DIR="${BENCHMARK_OUTPUT_DIR:-output}"
 mkdir -p "$OUTPUT_DIR/logs/serving"
@@ -21,19 +27,6 @@ mkdir -p "$OUTPUT_DIR/jsons/serving"
 
 log_path="$OUTPUT_DIR/logs/serving/${exp_name}_serving.log"
 result_path="$OUTPUT_DIR/jsons/serving/${exp_name}_serving.json"
-
-dataset_path=""
-case "$dataset" in
-  sharegpt) dataset_path="sharegpt.json" ;;
-  burstgpt) dataset_path="burstgpt.json" ;;
-  sonnet) dataset_path="sonnet.json" ;;
-  hf) dataset_path="$HF_DATASET_PATH" ;;
-esac
-
-if [[ -n "$dataset_path" && ! -f "$dataset_path" ]]; then
-  echo "[SKIP] $dataset_path not found. Skipping $exp_name."
-  exit 1
-fi
 
 export BENCHMARK_TYPE="serving"
 export BENCHMARK_MODEL="$model"
@@ -68,7 +61,9 @@ CMD=(python benchmarks/benchmark_serving.py
 )
 
 [[ "$ignore_eos" =~ [Tt]rue ]] && CMD+=(--ignore-eos)
-[[ -n "$dataset_path" ]] && CMD+=(--dataset-path "$dataset_path")
+if [[ -n "$dataset_path" && ( "$dataset" == "hf" || "$dataset" == "sharegpt" ) ]]; then
+  CMD+=(--dataset-path "$dataset_path")
+fi
 [[ "$dataset" == "hf" && -n "$HF_SUBSET" ]] && CMD+=(--hf-subset "$HF_SUBSET")
 [[ "$dataset" == "hf" && -n "$HF_SPLIT" ]] && CMD+=(--hf-split "$HF_SPLIT")
 [[ "$dataset" == "hf" && -n "$HF_OUTPUT_LEN" ]] && CMD+=(--hf-output-len "$HF_OUTPUT_LEN")
@@ -76,6 +71,7 @@ CMD=(python benchmarks/benchmark_serving.py
 echo "[INFO] Running benchmark: $exp_name"
 echo "[INFO] Command: ${CMD[*]}"
 "${CMD[@]}" > "$log_path" 2>&1
+
 
 if [[ ! -s "$result_path" ]]; then
   echo "[ERROR] No results for $exp_name."
