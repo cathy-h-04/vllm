@@ -430,7 +430,31 @@ class LLMEngine:
         # the next step without re-scheduling.
         self._skip_scheduling_next_step = False
         self.engine_step_count = 0
-        # No metadata logic
+
+
+        self.benchmark_type = os.getenv("BENCHMARK_TYPE", "").strip().lower()
+
+        if self.benchmark_type == "serving":
+            self._benchmark_metadata_keys = [
+                "BENCHMARK_MODEL", "BENCHMARK_DATASET", "BENCHMARK_RATE",
+                "BENCHMARK_NUM_PROMPTS", "BENCHMARK_BURSTINESS",
+                "BENCHMARK_MAX_CONCURRENCY", "BENCHMARK_IGNORE_EOS",
+                "BENCHMARK_GPU_COUNT"
+            ]
+        elif self.benchmark_type == "latency":
+            self._benchmark_metadata_keys = [
+                "BENCHMARK_MODEL", "BENCHMARK_DATASET",
+                "BENCHMARK_INPUT_LEN", "BENCHMARK_OUTPUT_LEN",
+                "BENCHMARK_BATCH_SIZE", "BENCHMARK_GPU_COUNT"
+            ]
+        else:
+            self._benchmark_metadata_keys = []
+
+        self._benchmark_metadata = {
+            key.replace("BENCHMARK_", "").lower(): os.environ.get(key, "")
+            for key in self._benchmark_metadata_keys
+        }
+
     
     def _initialize_kv_caches(self) -> None:
         """Initialize the KV cache in the worker(s).
@@ -1385,12 +1409,14 @@ class LLMEngine:
         # === Define headers statically (no metadata) ===
         profile_header = ["step_id", "profiling_time_ms", "cpu_profile_pct", "mem_profile_gb", "data_parallel", "pipeline_parallel", "tensor_parallel"]
         decode_header = ["step_id", "decode_time_ms", "cpu_decode_pct", "mem_decode_gb", "data_parallel", "pipeline_parallel", "tensor_parallel"]
+        metadata_row = list(self._benchmark_metadata.values())
+        metadata_header = list(self._benchmark_metadata.keys())
 
         for path, header in [(profile_log, profile_header), (decode_log, decode_header)]:
             if not os.path.exists(path):
                 os.makedirs(os.path.dirname(path), exist_ok=True)
                 with open(path, "w", newline="") as f:
-                    csv.writer(f).writerow(header)
+                    csv.writer(f).writerow(header + metadata_header)
 
         # Skip the scheduler if there are any remaining steps in the seq groups.
         # This ensures that the scheduler is only called again when the current
@@ -1432,7 +1458,7 @@ class LLMEngine:
             ] 
 
             with open(profile_log, "a", newline="") as f:
-                csv.writer(f).writerow(profiling_row)
+                csv.writer(f).writerow(profiling_row + metadata_row)
 
             ctx.seq_group_metadata_list = seq_group_metadata_list
             ctx.scheduler_outputs = scheduler_outputs
@@ -1518,7 +1544,7 @@ class LLMEngine:
                 ] 
 
                 with open(decode_log, "a", newline="") as f:
-                    csv.writer(f).writerow(decode_row)
+                    csv.writer(f).writerow(decode_row + metadata_row)
 
                 
                 self._skip_scheduling_next_step = False
@@ -1776,13 +1802,21 @@ class LLMEngine:
             pc.tensor_parallel_size
         ]
 
-        if not os.path.exists(stat_log_path):
-            os.makedirs(os.path.dirname(stat_log_path), exist_ok=True)
-            with open(stat_log_path, "w", newline="") as f:
-                csv.writer(f).writerow(core_header)
+        metadata_row = list(self._benchmark_metadata.values())
+        metadata_header = list(self._benchmark_metadata.keys())
+        dir_path = os.path.dirname(stat_log_path)
+
+        if dir_path and not os.path.exists(dir_path):
+            os.makedirs(dir_path, exist_ok=True)
+
+        write_header = not os.path.exists(stat_log_path) or os.path.getsize(stat_log_path) == 0
 
         with open(stat_log_path, "a", newline="") as f:
-            csv.writer(f).writerow(core_row)
+            writer = csv.writer(f)
+            if write_header:
+                writer.writerow(core_header + metadata_header)
+            writer.writerow(core_row + metadata_row)
+
 
 
 
